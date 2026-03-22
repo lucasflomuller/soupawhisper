@@ -2,10 +2,10 @@
 name = "soupawhisper"
 version = "0.2.0"
 description = "Push-to-talk voice dictation for Wayland/Hyprland using faster-whisper"
-authors = ["Kyle <kyle@ksred.com>"]
+authors = ["Kyle <kyle@ksred.com>", "Lucas Muller <lucasflorianomuller@gmail.com>"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/ksred/soupawhisper"
+repository = "https://github.com/lucasflomuller/soupawhisper"
 keywords = ["whisper", "dictation", "voice", "transcription", "speech-to-text", "wayland"]
 classifiers = [
     "Development Status :: 4 - Beta",

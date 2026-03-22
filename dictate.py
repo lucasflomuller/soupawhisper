@@ -40,6 +40,8 @@ def load_config():
         "compute_type": config.get("whisper", "compute_type", fallback=defaults["compute_type"]),
         "auto_type": config.getboolean("behavior", "auto_type", fallback=True),
         "notifications": config.getboolean("behavior", "notifications", fallback=True),
+        "initial_prompt": config.get("context", "initial_prompt", fallback=None),
+        "hotwords": config.get("context", "hotwords", fallback=None),
     }
 
 
@@ -89,7 +91,12 @@ def transcribe_file(audio_file: str, config: dict) -> str:
     )
 
     print("Transcribing...")
-    segments, _ = model.transcribe(audio_file, beam_size=5, vad_filter=True)
+    transcribe_opts = {"beam_size": 5, "vad_filter": True}
+    if config.get("initial_prompt"):
+        transcribe_opts["initial_prompt"] = config["initial_prompt"]
+    if config.get("hotwords"):
+        transcribe_opts["hotwords"] = config["hotwords"]
+    segments, _ = model.transcribe(audio_file, **transcribe_opts)
     text = " ".join(segment.text.strip() for segment in segments)
     return text
 

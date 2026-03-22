@@ -57,6 +57,10 @@ def main():
     audio_file = sys.argv[1]
     config = load_config()
 
+    def _notify(*args, **kwargs):
+        if config["notifications"]:
+            notify(*args, **kwargs)
+
     try:
         model = WhisperModel(
             config["model"],
@@ -86,7 +90,7 @@ def main():
             if config["auto_type"]:
                 result = subprocess.run(["wtype", text], capture_output=True)
                 if result.returncode != 0:
-                    notify(
+                    _notify(
                         "Copied!",
                         f"{text[:80]}... (couldn't type)",
                         "emblem-ok-symbolic",
@@ -95,7 +99,7 @@ def main():
                     print(text)
                     return
 
-            notify(
+            _notify(
                 "Copied!",
                 text[:100] + ("..." if len(text) > 100 else ""),
                 "emblem-ok-symbolic",
@@ -103,10 +107,10 @@ def main():
             )
             print(text)
         else:
-            notify("No speech detected", "Try speaking louder", "dialog-warning", 2000)
+            _notify("No speech detected", "Try speaking louder", "dialog-warning", 2000)
 
     except Exception as e:
-        notify("Error", str(e)[:50], "dialog-error", 3000)
+        _notify("Error", str(e)[:50], "dialog-error", 3000)
         print(f"Error: {e}", file=sys.stderr)
     finally:
         if os.path.exists(audio_file):

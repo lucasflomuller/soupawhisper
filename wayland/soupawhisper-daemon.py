@@ -63,6 +63,10 @@ class Daemon:
         self.model = None
         self.running = True
 
+    def _notify(self, title, message, icon="dialog-information", timeout=2000):
+        if self.config["notifications"]:
+            notify(title, message, icon, timeout)
+
     def load_model(self):
         print(f"Loading Whisper model ({self.config['model']})...")
         self.model = WhisperModel(
@@ -75,7 +79,7 @@ class Daemon:
             print(f"Context prompt: {self.config['initial_prompt'][:60]}...")
         if self.config["hotwords"]:
             print(f"Hotwords: {self.config['hotwords'][:60]}...")
-        notify("SoupaWhisper", "Daemon ready - press F9 to dictate", "audio-input-microphone", 3000)
+        self._notify("SoupaWhisper", "Daemon ready - press F9 to dictate", "audio-input-microphone", 3000)
 
     def transcribe(self, audio_file):
         try:
@@ -101,10 +105,10 @@ class Daemon:
                 if self.config["auto_type"]:
                     result = subprocess.run(["wtype", text], capture_output=True)
                     if result.returncode != 0:
-                        notify("Copied!", f"{text[:80]}...", "emblem-ok-symbolic", 3000)
+                        self._notify("Copied!", f"{text[:80]}...", "emblem-ok-symbolic", 3000)
                         return text
 
-                notify(
+                self._notify(
                     "Copied!",
                     text[:100] + ("..." if len(text) > 100 else ""),
                     "emblem-ok-symbolic",
@@ -112,10 +116,10 @@ class Daemon:
                 )
                 return text
             else:
-                notify("No speech detected", "Try speaking louder", "dialog-warning", 2000)
+                self._notify("No speech detected", "Try speaking louder", "dialog-warning", 2000)
                 return ""
         except Exception as e:
-            notify("Error", str(e)[:50], "dialog-error", 3000)
+            self._notify("Error", str(e)[:50], "dialog-error", 3000)
             print(f"Transcription error: {e}", file=sys.stderr)
             return ""
         finally:
@@ -127,12 +131,12 @@ class Daemon:
         try:
             # Check audio file exists
             if not os.path.exists(audio_file):
-                notify("No audio", "Recording file not found", "dialog-warning", 2000)
+                self._notify("No audio", "Recording file not found", "dialog-warning", 2000)
                 return ""
 
             # Check audio file has content
             if os.path.getsize(audio_file) == 0:
-                notify("No audio", "Recording was empty", "dialog-warning", 2000)
+                self._notify("No audio", "Recording was empty", "dialog-warning", 2000)
                 return ""
 
             transcribe_opts = {
@@ -149,7 +153,7 @@ class Daemon:
 
             # Handle empty transcription
             if not text or not text.strip():
-                notify("No speech detected", "Try speaking louder or closer to mic", "dialog-warning", 2000)
+                self._notify("No speech detected", "Try speaking louder or closer to mic", "dialog-warning", 2000)
                 return ""
 
             # Clean up text (remove leading/trailing whitespace)
@@ -163,13 +167,13 @@ class Daemon:
                 with open(todo_path, "a") as f:
                     f.write(todo_line)
             except PermissionError:
-                notify("Permission denied", f"Cannot write to {todo_path}", "dialog-error", 3000)
+                self._notify("Permission denied", f"Cannot write to {todo_path}", "dialog-error", 3000)
                 return ""
             except IOError as e:
-                notify("Write failed", f"Could not save todo: {e}", "dialog-error", 3000)
+                self._notify("Write failed", f"Could not save todo: {e}", "dialog-error", 3000)
                 return ""
 
-            notify(
+            self._notify(
                 "Todo added!",
                 text[:100] + ("..." if len(text) > 100 else ""),
                 "checkbox-checked-symbolic",
@@ -178,7 +182,7 @@ class Daemon:
             return text
 
         except Exception as e:
-            notify("Error", str(e)[:50], "dialog-error", 3000)
+            self._notify("Error", str(e)[:50], "dialog-error", 3000)
             print(f"Todo transcription error: {e}", file=sys.stderr)
             return ""
         finally:
