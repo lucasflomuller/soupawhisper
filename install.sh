@@ -1,54 +1,26 @@
 #!/bin/bash
-# Install SoupaWhisper on Linux
-# Supports: Ubuntu, Pop!_OS, Debian, Fedora, Arch
+# Install SoupaWhisper for Wayland/Hyprland
+# Optimized for Arch Linux with PipeWire
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$HOME/.config/soupawhisper"
 SERVICE_DIR="$HOME/.config/systemd/user"
+HYPR_BINDINGS="$HOME/.config/hypr/bindings.conf"
 
-# Detect package manager
-detect_package_manager() {
-    if command -v apt &> /dev/null; then
-        echo "apt"
-    elif command -v dnf &> /dev/null; then
-        echo "dnf"
-    elif command -v pacman &> /dev/null; then
-        echo "pacman"
-    elif command -v zypper &> /dev/null; then
-        echo "zypper"
-    else
-        echo "unknown"
-    fi
-}
-
-# Install system dependencies
+# Install system dependencies (Wayland)
 install_deps() {
-    local pm=$(detect_package_manager)
-
-    echo "Detected package manager: $pm"
     echo "Installing system dependencies..."
 
-    case $pm in
-        apt)
-            sudo apt update
-            sudo apt install -y alsa-utils xclip xdotool libnotify-bin
-            ;;
-        dnf)
-            sudo dnf install -y alsa-utils xclip xdotool libnotify
-            ;;
-        pacman)
-            sudo pacman -S --noconfirm alsa-utils xclip xdotool libnotify
-            ;;
-        zypper)
-            sudo zypper install -y alsa-utils xclip xdotool libnotify-tools
-            ;;
-        *)
-            echo "Unknown package manager. Please install manually:"
-            echo "  alsa-utils xclip xdotool libnotify"
-            ;;
-    esac
+    if command -v pacman &> /dev/null; then
+        sudo pacman -S --noconfirm --needed wl-clipboard wtype libnotify openbsd-netcat
+        # pipewire (pw-record) should already be installed on modern Arch
+    else
+        echo "Non-Arch system detected. Please install manually:"
+        echo "  wl-clipboard wtype libnotify netcat"
+        echo "  (and ensure PipeWire is installed for pw-record)"
+    fi
 }
 
 # Install Python dependencies
@@ -57,12 +29,14 @@ install_python() {
     echo "Installing Python dependencies..."
 
     if ! command -v poetry &> /dev/null; then
-        echo "Poetry not found. Please install Poetry first:"
-        echo "  curl -sSL https://install.python-poetry.org | python3 -"
-        exit 1
+        echo "Poetry not found. Installing..."
+        curl -sSL https://install.python-poetry.org | python3 -
+        export PATH="$HOME/.local/bin:$PATH"
     fi
 
-    poetry install
+    cd "$SCRIPT_DIR"
+    poetry config virtualenvs.in-project true
+    poetry install --no-interaction
 }
 
 # Setup config file
@@ -79,38 +53,73 @@ setup_config() {
     fi
 }
 
-# Install systemd service
+# Install Hyprland keybindings
+install_hyprland_bindings() {
+    echo ""
+    echo "Setting up Hyprland keybindings..."
+
+    # Make wayland scripts executable
+    chmod +x "$SCRIPT_DIR/wayland/soupawhisper-start"
+    chmod +x "$SCRIPT_DIR/wayland/soupawhisper-stop"
+    chmod +x "$SCRIPT_DIR/wayland/soupawhisper-start-todo"
+    chmod +x "$SCRIPT_DIR/wayland/soupawhisper-stop-todo"
+    chmod +x "$SCRIPT_DIR/wayland/soupawhisper-toggle-todo"
+    chmod +x "$SCRIPT_DIR/wayland/transcribe.py"
+    chmod +x "$SCRIPT_DIR/wayland/soupawhisper-daemon.py"
+
+    if [ ! -f "$HYPR_BINDINGS" ]; then
+        echo "Hyprland bindings file not found at $HYPR_BINDINGS"
+        echo "Please add these bindings manually:"
+        echo ""
+        echo "# SoupaWhisper voice dictation (push-to-talk: hold F9)"
+        echo "bindd = , F9, Start voice recording, exec, $SCRIPT_DIR/wayland/soupawhisper-start"
+        echo "binddr = , F9, Stop and transcribe, exec, $SCRIPT_DIR/wayland/soupawhisper-stop"
+        echo ""
+        echo "# SoupaWhisper todo capture (push-to-talk: hold F8)"
+        echo "bindd = , F8, Start todo recording, exec, $SCRIPT_DIR/wayland/soupawhisper-start-todo"
+        echo "binddr = , F8, Stop and add todo, exec, $SCRIPT_DIR/wayland/soupawhisper-stop-todo"
+        return
+    fi
+
+    if grep -q "soupawhisper" "$HYPR_BINDINGS" 2>/dev/null; then
+        echo "Hyprland bindings already configured"
+    else
+        cat >> "$HYPR_BINDINGS" << EOF
+
+# SoupaWhisper voice dictation (push-to-talk: hold F9)
+bindd = , F9, Start voice recording, exec, $SCRIPT_DIR/wayland/soupawhisper-start
+binddr = , F9, Stop and transcribe, exec, $SCRIPT_DIR/wayland/soupawhisper-stop
+
+# SoupaWhisper todo capture (push-to-talk: hold F8)
+bindd = , F8, Start todo recording, exec, $SCRIPT_DIR/wayland/soupawhisper-start-todo
+binddr = , F8, Stop and add todo, exec, $SCRIPT_DIR/wayland/soupawhisper-stop-todo
+EOF
+        echo "Added keybindings to $HYPR_BINDINGS"
+    fi
+}
+
+# Install systemd service for daemon
 install_service() {
     echo ""
     echo "Installing systemd user service..."
 
     mkdir -p "$SERVICE_DIR"
 
-    # Get current display settings
-    local display="${DISPLAY:-:0}"
-    local xauthority="${XAUTHORITY:-$HOME/.Xauthority}"
-    local venv_path="$SCRIPT_DIR/.venv"
-
-    # Check if venv exists
-    if [ ! -d "$venv_path" ]; then
-        venv_path=$(poetry env info --path 2>/dev/null || echo "$SCRIPT_DIR/.venv")
-    fi
-
     cat > "$SERVICE_DIR/soupawhisper.service" << EOF
 [Unit]
-Description=SoupaWhisper Voice Dictation
-After=graphical-session.target
+Description=SoupaWhisper Voice Dictation Daemon
+After=graphical-session.target pipewire.service
+BindsTo=graphical-session.target
 
 [Service]
 Type=simple
 WorkingDirectory=$SCRIPT_DIR
-ExecStart=$venv_path/bin/python $SCRIPT_DIR/dictate.py
+ExecStart=$SCRIPT_DIR/.venv/bin/python $SCRIPT_DIR/wayland/soupawhisper-daemon.py
 Restart=on-failure
 RestartSec=5
 
-# X11 display access
-Environment=DISPLAY=$display
-Environment=XAUTHORITY=$xauthority
+# Wayland environment
+PassEnvironment=WAYLAND_DISPLAY XDG_RUNTIME_DIR
 
 [Install]
 WantedBy=default.target
@@ -118,14 +127,13 @@ EOF
 
     echo "Created service at $SERVICE_DIR/soupawhisper.service"
 
-    # Reload and enable
     systemctl --user daemon-reload
     systemctl --user enable soupawhisper
 
     echo ""
     echo "Service installed! Commands:"
-    echo "  systemctl --user start soupawhisper   # Start"
-    echo "  systemctl --user stop soupawhisper    # Stop"
+    echo "  systemctl --user start soupawhisper   # Start daemon"
+    echo "  systemctl --user stop soupawhisper    # Stop daemon"
     echo "  systemctl --user status soupawhisper  # Status"
     echo "  journalctl --user -u soupawhisper -f  # Logs"
 }
@@ -133,19 +141,20 @@ EOF
 # Main
 main() {
     echo "==================================="
-    echo "  SoupaWhisper Installer"
+    echo "  SoupaWhisper Wayland Installer"
     echo "==================================="
     echo ""
 
     install_deps
     install_python
     setup_config
+    install_hyprland_bindings
 
     echo ""
-    read -p "Install as systemd service? [y/N] " -n 1 -r
+    read -p "Install systemd service (daemon)? [Y/n] " -n 1 -r
     echo ""
 
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
         install_service
     fi
 
@@ -154,12 +163,16 @@ main() {
     echo "  Installation complete!"
     echo "==================================="
     echo ""
-    echo "To run manually:"
-    echo "  poetry run python dictate.py"
+    echo "Next steps:"
+    echo "  1. Reload Hyprland: hyprctl reload"
+    echo "  2. Start daemon:    systemctl --user start soupawhisper"
+    echo "  3. Use:             Hold F9 to record, release to transcribe"
     echo ""
     echo "Config: $CONFIG_DIR/config.ini"
-    echo "Hotkey: F12 (hold to record)"
-    echo "Exit:   Ctrl+C"
+    echo ""
+    echo "Manual transcription:"
+    echo "  poetry run python dictate.py -f audio.wav"
+    echo "  poetry run python dictate.py -d 5  # Record for 5 seconds"
 }
 
 main "$@"

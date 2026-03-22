@@ -1,0 +1,104 @@
+#!/bin/bash
+# soupawhisper-toggle-todo - Toggle recording on/off, append to todo.md
+
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/soupawhisper-todo"
+mkdir -p "$RUNTIME_DIR"
+
+# Uses main daemon socket (shared model)
+SOCKET_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/soupawhisper"
+LOCK_FILE="$RUNTIME_DIR/recording.lock"
+PID_FILE="$RUNTIME_DIR/recording.pid"
+AUDIO_FILE="$RUNTIME_DIR/recording.wav"
+START_TIME_FILE="$RUNTIME_DIR/start_time"
+SOCKET_PATH="$SOCKET_DIR/daemon.sock"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Acquire lock
+exec 200>"$LOCK_FILE"
+flock -x 200
+
+# Check if currently recording
+is_recording() {
+    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+start_recording() {
+    # Record start time
+    date +%s%3N > "$START_TIME_FILE"
+
+    # Start recording with PipeWire
+    # Close fd 200 (lock) so pw-record doesn't inherit it
+    pw-record --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" 200>&- &
+    PW_PID=$!
+
+    # Atomic PID write
+    echo "$PW_PID" > "$PID_FILE.tmp"
+    mv "$PID_FILE.tmp" "$PID_FILE"
+
+    notify-send -a "SoupaWhisper" -i "checkbox-checked-symbolic" \
+        -t 30000 -h "string:x-canonical-private-synchronous:soupawhisper-todo" \
+        "Recording todo..." "Press F8 again to stop"
+}
+
+stop_recording() {
+    # Stop recording with SIGINT (ensures buffer flush)
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            kill -INT "$PID" 2>/dev/null
+            # Wait for process to exit
+            for i in {1..20}; do
+                kill -0 "$PID" 2>/dev/null || break
+                sleep 0.1
+            done
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    # Check minimum duration (300ms)
+    if [ -f "$START_TIME_FILE" ]; then
+        START_TIME=$(cat "$START_TIME_FILE")
+        NOW=$(date +%s%3N)
+        DURATION=$((NOW - START_TIME))
+        rm -f "$START_TIME_FILE"
+
+        if [ "$DURATION" -lt 300 ]; then
+            notify-send -a "SoupaWhisper" -i "dialog-warning" -t 2000 \
+                -h "string:x-canonical-private-synchronous:soupawhisper-todo" \
+                "Too short" "Record for longer"
+            rm -f "$AUDIO_FILE"
+            return
+        fi
+    fi
+
+    # Check audio file
+    if [ ! -f "$AUDIO_FILE" ] || [ ! -s "$AUDIO_FILE" ]; then
+        notify-send -a "SoupaWhisper" -i "dialog-warning" -t 2000 \
+            -h "string:x-canonical-private-synchronous:soupawhisper-todo" \
+            "No audio" "Recording failed"
+        return
+    fi
+
+    notify-send -a "SoupaWhisper" -i "emblem-synchronizing" -t 30000 \
+        -h "string:x-canonical-private-synchronous:soupawhisper-todo" \
+        "Adding todo..." "Processing your speech"
+
+    # Send to daemon via socket
+    if [ -S "$SOCKET_PATH" ]; then
+        RESULT=$(echo "TRANSCRIBE_TODO:$AUDIO_FILE" | timeout 30 nc -U "$SOCKET_PATH" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            echo "$RESULT"
+        fi
+    else
+        notify-send -a "SoupaWhisper" -i "dialog-error" -t 3000 \
+            -h "string:x-canonical-private-synchronous:soupawhisper-todo" \
+            "Daemon not running" "Start with: systemctl --user start soupawhisper"
+    fi
+}
+
+# Toggle!
+if is_recording; then
+    stop_recording
+else
+    start_recording
+fi

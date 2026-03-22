@@ -1,37 +1,32 @@
 #!/usr/bin/env python3
 """
 SoupaWhisper - Voice dictation tool using faster-whisper.
-Hold the hotkey to record, release to transcribe and copy to clipboard.
+
+Wayland version: Uses Hyprland keybindings (F9) for push-to-talk.
+This script can also be used for manual single-file transcription.
 """
 
 import argparse
 import configparser
-import subprocess
-import tempfile
-import threading
-import signal
-import sys
 import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
-from pynput import keyboard
 from faster_whisper import WhisperModel
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-# Load configuration
 CONFIG_PATH = Path.home() / ".config" / "soupawhisper" / "config.ini"
 
 
 def load_config():
     config = configparser.ConfigParser()
-
-    # Defaults
     defaults = {
         "model": "base.en",
         "device": "cpu",
         "compute_type": "int8",
-        "key": "f12",
         "auto_type": "true",
         "notifications": "true",
     }
@@ -43,230 +38,174 @@ def load_config():
         "model": config.get("whisper", "model", fallback=defaults["model"]),
         "device": config.get("whisper", "device", fallback=defaults["device"]),
         "compute_type": config.get("whisper", "compute_type", fallback=defaults["compute_type"]),
-        "key": config.get("hotkey", "key", fallback=defaults["key"]),
         "auto_type": config.getboolean("behavior", "auto_type", fallback=True),
         "notifications": config.getboolean("behavior", "notifications", fallback=True),
     }
 
 
-CONFIG = load_config()
-
-
-def get_hotkey(key_name):
-    """Map key name to pynput key."""
-    key_name = key_name.lower()
-    if hasattr(keyboard.Key, key_name):
-        return getattr(keyboard.Key, key_name)
-    elif len(key_name) == 1:
-        return keyboard.KeyCode.from_char(key_name)
-    else:
-        print(f"Unknown key: {key_name}, defaulting to f12")
-        return keyboard.Key.f12
-
-
-HOTKEY = get_hotkey(CONFIG["key"])
-MODEL_SIZE = CONFIG["model"]
-DEVICE = CONFIG["device"]
-COMPUTE_TYPE = CONFIG["compute_type"]
-AUTO_TYPE = CONFIG["auto_type"]
-NOTIFICATIONS = CONFIG["notifications"]
-
-
-class Dictation:
-    def __init__(self):
-        self.recording = False
-        self.record_process = None
-        self.temp_file = None
-        self.model = None
-        self.model_loaded = threading.Event()
-        self.model_error = None
-        self.running = True
-
-        # Load model in background
-        print(f"Loading Whisper model ({MODEL_SIZE})...")
-        threading.Thread(target=self._load_model, daemon=True).start()
-
-    def _load_model(self):
-        try:
-            self.model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
-            self.model_loaded.set()
-            hotkey_name = HOTKEY.name if hasattr(HOTKEY, 'name') else HOTKEY.char
-            print(f"Model loaded. Ready for dictation!")
-            print(f"Hold [{hotkey_name}] to record, release to transcribe.")
-            print("Press Ctrl+C to quit.")
-        except Exception as e:
-            self.model_error = str(e)
-            self.model_loaded.set()
-            print(f"Failed to load model: {e}")
-            if "cudnn" in str(e).lower() or "cuda" in str(e).lower():
-                print("Hint: Try setting device = cpu in your config, or install cuDNN.")
-
-    def notify(self, title, message, icon="dialog-information", timeout=2000):
-        """Send a desktop notification."""
-        if not NOTIFICATIONS:
-            return
-        subprocess.run(
-            [
-                "notify-send",
-                "-a", "SoupaWhisper",
-                "-i", icon,
-                "-t", str(timeout),
-                "-h", "string:x-canonical-private-synchronous:soupawhisper",
-                title,
-                message
-            ],
-            capture_output=True
-        )
-
-    def start_recording(self):
-        if self.recording or self.model_error:
-            return
-
-        self.recording = True
-        self.temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        self.temp_file.close()
-
-        # Record using arecord (ALSA) - works on most Linux systems
-        self.record_process = subprocess.Popen(
-            [
-                "arecord",
-                "-f", "S16_LE",  # Format: 16-bit little-endian
-                "-r", "16000",   # Sample rate: 16kHz (what Whisper expects)
-                "-c", "1",       # Mono
-                "-t", "wav",
-                self.temp_file.name
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        print("Recording...")
-        hotkey_name = HOTKEY.name if hasattr(HOTKEY, 'name') else HOTKEY.char
-        self.notify("Recording...", f"Release {hotkey_name.upper()} when done", "audio-input-microphone", 30000)
-
-    def stop_recording(self):
-        if not self.recording:
-            return
-
-        self.recording = False
-
-        if self.record_process:
-            self.record_process.terminate()
-            self.record_process.wait()
-            self.record_process = None
-
-        print("Transcribing...")
-        self.notify("Transcribing...", "Processing your speech", "emblem-synchronizing", 30000)
-
-        # Wait for model if not loaded yet
-        self.model_loaded.wait()
-
-        if self.model_error:
-            print(f"Cannot transcribe: model failed to load")
-            self.notify("Error", "Model failed to load", "dialog-error", 3000)
-            return
-
-        # Transcribe
-        try:
-            segments, info = self.model.transcribe(
-                self.temp_file.name,
-                beam_size=5,
-                vad_filter=True,
-            )
-
-            text = " ".join(segment.text.strip() for segment in segments)
-
-            if text:
-                # Copy to clipboard using xclip
-                process = subprocess.Popen(
-                    ["xclip", "-selection", "clipboard"],
-                    stdin=subprocess.PIPE
-                )
-                process.communicate(input=text.encode())
-
-                # Type it into the active input field
-                if AUTO_TYPE:
-                    subprocess.run(["xdotool", "type", "--clearmodifiers", text])
-
-                print(f"Copied: {text}")
-                self.notify("Copied!", text[:100] + ("..." if len(text) > 100 else ""), "emblem-ok-symbolic", 3000)
-            else:
-                print("No speech detected")
-                self.notify("No speech detected", "Try speaking louder", "dialog-warning", 2000)
-
-        except Exception as e:
-            print(f"Error: {e}")
-            self.notify("Error", str(e)[:50], "dialog-error", 3000)
-        finally:
-            # Cleanup temp file
-            if self.temp_file and os.path.exists(self.temp_file.name):
-                os.unlink(self.temp_file.name)
-
-    def on_press(self, key):
-        if key == HOTKEY:
-            self.start_recording()
-
-    def on_release(self, key):
-        if key == HOTKEY:
-            self.stop_recording()
-
-    def stop(self):
-        print("\nExiting...")
-        self.running = False
-        os._exit(0)
-
-    def run(self):
-        with keyboard.Listener(
-            on_press=self.on_press,
-            on_release=self.on_release
-        ) as listener:
-            listener.join()
+def notify(title, message, icon="dialog-information", timeout=2000):
+    """Send a desktop notification."""
+    subprocess.run(
+        [
+            "notify-send",
+            "-a", "SoupaWhisper",
+            "-i", icon,
+            "-t", str(timeout),
+            "-h", "string:x-canonical-private-synchronous:soupawhisper",
+            title,
+            message,
+        ],
+        capture_output=True,
+    )
 
 
 def check_dependencies():
-    """Check that required system commands are available."""
+    """Check that required Wayland commands are available."""
     missing = []
 
-    for cmd in ["arecord", "xclip"]:
+    for cmd, pkg in [("pw-record", "pipewire"), ("wl-copy", "wl-clipboard")]:
         if subprocess.run(["which", cmd], capture_output=True).returncode != 0:
-            pkg = "alsa-utils" if cmd == "arecord" else cmd
             missing.append((cmd, pkg))
 
-    if AUTO_TYPE:
-        if subprocess.run(["which", "xdotool"], capture_output=True).returncode != 0:
-            missing.append(("xdotool", "xdotool"))
+    config = load_config()
+    if config["auto_type"]:
+        if subprocess.run(["which", "wtype"], capture_output=True).returncode != 0:
+            missing.append(("wtype", "wtype"))
 
     if missing:
         print("Missing dependencies:")
         for cmd, pkg in missing:
-            print(f"  {cmd} - install with: sudo apt install {pkg}")
+            print(f"  {cmd} - install with: sudo pacman -S {pkg}")
         sys.exit(1)
+
+
+def transcribe_file(audio_file: str, config: dict) -> str:
+    """Transcribe an audio file and return the text."""
+    print(f"Loading model ({config['model']})...")
+    model = WhisperModel(
+        config["model"],
+        device=config["device"],
+        compute_type=config["compute_type"],
+    )
+
+    print("Transcribing...")
+    segments, _ = model.transcribe(audio_file, beam_size=5, vad_filter=True)
+    text = " ".join(segment.text.strip() for segment in segments)
+    return text
+
+
+def record_audio(duration: float = None) -> str:
+    """Record audio using PipeWire and return the temp file path."""
+    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    temp_file.close()
+
+    cmd = ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16"]
+    if duration:
+        # Note: pw-record doesn't have a native duration flag, so we use timeout
+        cmd = ["timeout", str(duration)] + cmd
+    cmd.append(temp_file.name)
+
+    print(f"Recording... (Press Ctrl+C to stop)" if not duration else f"Recording for {duration}s...")
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        pass
+
+    return temp_file.name
+
+
+def copy_to_clipboard(text: str):
+    """Copy text to Wayland clipboard using wl-copy."""
+    process = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
+    process.communicate(input=text.encode())
+
+
+def type_text(text: str):
+    """Type text into the active window using wtype."""
+    subprocess.run(["wtype", text])
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SoupaWhisper - Push-to-talk voice dictation"
+        description="SoupaWhisper - Voice dictation for Wayland/Hyprland"
     )
     parser.add_argument(
         "-v", "--version",
         action="version",
-        version=f"SoupaWhisper {__version__}"
+        version=f"SoupaWhisper {__version__}",
     )
-    parser.parse_args()
+    parser.add_argument(
+        "-f", "--file",
+        help="Transcribe an existing audio file instead of recording",
+    )
+    parser.add_argument(
+        "-d", "--duration",
+        type=float,
+        help="Record for a specific duration in seconds",
+    )
+    parser.add_argument(
+        "--no-type",
+        action="store_true",
+        help="Don't auto-type the transcription",
+    )
+    parser.add_argument(
+        "--no-clipboard",
+        action="store_true",
+        help="Don't copy to clipboard",
+    )
 
-    print(f"SoupaWhisper v{__version__}")
+    args = parser.parse_args()
+    config = load_config()
+
+    print(f"SoupaWhisper v{__version__} (Wayland)")
     print(f"Config: {CONFIG_PATH}")
+    print()
 
     check_dependencies()
 
-    dictation = Dictation()
+    # Determine audio source
+    if args.file:
+        audio_file = args.file
+        cleanup = False
+    else:
+        audio_file = record_audio(args.duration)
+        cleanup = True
 
-    # Handle Ctrl+C gracefully
-    def handle_sigint(sig, frame):
-        dictation.stop()
+    try:
+        # Transcribe
+        text = transcribe_file(audio_file, config)
 
-    signal.signal(signal.SIGINT, handle_sigint)
+        if text:
+            print(f"\nTranscription: {text}\n")
 
-    dictation.run()
+            if not args.no_clipboard:
+                copy_to_clipboard(text)
+                print("Copied to clipboard!")
+
+            if config["auto_type"] and not args.no_type:
+                type_text(text)
+                print("Typed into active window!")
+
+            if config["notifications"]:
+                notify(
+                    "Copied!",
+                    text[:100] + ("..." if len(text) > 100 else ""),
+                    "emblem-ok-symbolic",
+                    3000,
+                )
+        else:
+            print("No speech detected")
+            if config["notifications"]:
+                notify("No speech detected", "Try speaking louder", "dialog-warning", 2000)
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if config.get("notifications", True):
+            notify("Error", str(e)[:50], "dialog-error", 3000)
+        sys.exit(1)
+    finally:
+        if cleanup and os.path.exists(audio_file):
+            os.unlink(audio_file)
 
 
 if __name__ == "__main__":

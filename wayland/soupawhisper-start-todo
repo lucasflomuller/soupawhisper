@@ -1,0 +1,38 @@
+#!/bin/bash
+# soupawhisper-start-todo - Start recording for todo item
+
+set -e
+
+# Use secure runtime directory (separate from main soupawhisper)
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/soupawhisper-todo"
+mkdir -p "$RUNTIME_DIR"
+
+LOCK_FILE="$RUNTIME_DIR/recording.lock"
+PID_FILE="$RUNTIME_DIR/recording.pid"
+AUDIO_FILE="$RUNTIME_DIR/recording.wav"
+START_TIME_FILE="$RUNTIME_DIR/start_time"
+
+# Acquire exclusive lock (prevents race conditions)
+exec 200>"$LOCK_FILE"
+flock -n 200 || exit 0  # Already recording, ignore
+
+# Check if already recording
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    exit 0
+fi
+
+# Record start time for minimum duration check
+date +%s%3N > "$START_TIME_FILE"
+
+# Start recording with PipeWire
+pw-record --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" &
+PW_PID=$!
+
+# Atomic PID write
+echo "$PW_PID" > "$PID_FILE.tmp"
+mv "$PID_FILE.tmp" "$PID_FILE"
+
+# Notification
+notify-send -a "SoupaWhisper" -i "checkbox-checked-symbolic" \
+    -t 30000 -h "string:x-canonical-private-synchronous:soupawhisper-todo" \
+    "Recording todo..." "Release F8 when done"
